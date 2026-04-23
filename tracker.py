@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
 import requests
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
 
 RAPIDAPI_KEY   = "9dbddf380emsh7cf8e17e473544bp173af4jsn314853b48f43"
 TELEGRAM_TOKEN = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
 CHAT_IDS       = ["5023801264", "1372959952"]
 POLL_INTERVAL  = 15
+PORT           = int(os.environ.get("PORT", 10000))
 
 HEADERS = {
     "X-RapidAPI-Key":  RAPIDAPI_KEY,
     "X-RapidAPI-Host": "cricbuzz-cricket.p.rapidapi.com",
 }
+
+
+# ── Health check server (required by Render) ──────────────────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"IPL Tracker is running")
+    def log_message(self, *args):
+        pass  # silence request logs
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -105,14 +124,12 @@ def extract_scores(data: dict) -> dict:
 
 # ── Event detection ───────────────────────────────────────────────────────────
 
-def check_events(data: dict, match_name: str,
-                 prev_batters: dict, prev_scores: dict,
-                 milestones_sent: set, baseline_only: bool = False):
+def check_events(data, match_name, prev_batters, prev_scores,
+                 milestones_sent, baseline_only=False):
     curr_batters = extract_batting(data)
     curr_scores  = extract_scores(data)
 
     if not baseline_only:
-        # Wickets
         for iid, curr in curr_scores.items():
             prev_w = prev_scores.get(iid, {}).get("w", 0)
             if curr["w"] > prev_w:
@@ -122,7 +139,6 @@ def check_events(data: dict, match_name: str,
                         f"{curr['label']}: {curr['r']}/{curr['w']}"
                     )
 
-        # Per-batter events
         for name, curr in curr_batters.items():
             prev = prev_batters.get(name, {"r": 0, "fours": 0, "sixes": 0})
 
@@ -140,16 +156,15 @@ def check_events(data: dict, match_name: str,
                 send_alert(f"💯 CENTURY!\n<b>{name}</b> scores a HUNDRED! ({curr['r']}*)")
                 milestones_sent.add(f"{name}_100")
 
-    # Always update state
     prev_batters.clear()
     prev_batters.update(curr_batters)
     prev_scores.clear()
     prev_scores.update(curr_scores)
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── Tracker loop ──────────────────────────────────────────────────────────────
 
-def main():
+def run_tracker():
     print("🏏 IPL Live Tracker started")
     send_alert("🏏 <b>IPL Live Tracker is now active!</b>\nWatching for 4s, 6s, wickets, and milestones.")
 
@@ -157,7 +172,8 @@ def main():
     prev_batters:    dict = {}
     prev_scores:     dict = {}
     milestones_sent: set  = set()
-    ended_ids:       set  = set()  # never re-pick a finished match
+    ended_ids:       set  = set()
+    first_poll = False
 
     while True:
         if not match_id:
@@ -174,19 +190,17 @@ def main():
             milestones_sent.clear()
             first_poll = True
         else:
-            first_poll = False
-
-        # If currently on a non-IPL match, check if IPL has started
-        if match_id and "ipl" not in match_name.lower() and "indian premier" not in match_name.lower():
-            ipl_id, ipl_name = get_live_match(skip_ids=ended_ids | {mid for mid in [] if "ipl" not in match_name.lower()})
-            if ipl_id and ipl_id != match_id and ("ipl" in ipl_name.lower() or "indian premier" in ipl_name.lower()):
-                print(f"IPL match detected! Switching from {match_name} → {ipl_name}")
-                send_alert(f"🏏 <b>Switching to IPL!</b>\n{ipl_name}")
-                match_id, match_name = ipl_id, ipl_name
-                prev_batters.clear()
-                prev_scores.clear()
-                milestones_sent.clear()
-                first_poll = True
+            # Switch to IPL if a non-IPL match is currently being tracked
+            if "ipl" not in match_name.lower() and "indian premier" not in match_name.lower():
+                ipl_id, ipl_name = get_live_match(skip_ids=ended_ids)
+                if ipl_id and ipl_id != match_id and ("ipl" in ipl_name.lower() or "indian premier" in ipl_name.lower()):
+                    print(f"IPL detected! Switching → {ipl_name}")
+                    send_alert(f"🏏 <b>Switching to IPL!</b>\n{ipl_name}")
+                    match_id, match_name = ipl_id, ipl_name
+                    prev_batters.clear()
+                    prev_scores.clear()
+                    milestones_sent.clear()
+                    first_poll = True
 
         data = get_scorecard(match_id)
         if not data:
@@ -200,15 +214,23 @@ def main():
             time.sleep(60)
             continue
 
-        # first_poll=True: set baseline silently, no alerts for old events
         check_events(data, match_name, prev_batters, prev_scores,
                      milestones_sent, baseline_only=first_poll)
 
         if first_poll:
             print("Baseline set — watching for new events...")
+            first_poll = False
 
         time.sleep(POLL_INTERVAL)
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    main()
+    # Start health check server in background thread
+    t = threading.Thread(target=start_health_server, daemon=True)
+    t.start()
+    print(f"Health server running on port {PORT}")
+
+    # Run tracker in main thread
+    run_tracker()
