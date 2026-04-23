@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: ipl-live-tracker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python tracker.py
+    plan: free
