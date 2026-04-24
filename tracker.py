@@ -19,7 +19,8 @@ PORT            = int(os.environ.get("PORT", 10000))
 
 CT_ACCOUNT_ID   = "KKW-674-856Z"
 CT_PASSCODE     = "CHW-SMA-CPUL"
-CT_URL          = "https://api.clevertap.com/1/targets/create.json"
+CT_SEGMENT_ID   = 1777028529
+CT_URL          = "https://eu1.api.clevertap.com/1/targets/create.json"
 
 BASE = "https://www.cricbuzz.com"
 HDR  = {
@@ -85,7 +86,7 @@ def send_clevertap(title: str, body: str):
             json={
                 "name":    f"{title[:40]} — {int(time.time())}",
                 "when":    "now",
-                "where":   {"common_profile_prop": {"profile_fields": []}},
+                "segment": CT_SEGMENT_ID,
                 "content": {"title": title, "body": body},
                 "devices": ["android", "ios"],
             },
