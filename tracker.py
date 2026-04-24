@@ -6,6 +6,7 @@ Sends Telegram alerts when any batter reaches 50 or 100.
 """
 import re
 import time
+import random
 import threading
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -13,8 +14,8 @@ import os
 
 TELEGRAM_TOKEN  = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
 CHAT_IDS        = ["5023801264", "1372959952"]
-POLL_INTERVAL   = 60    # seconds between scorecard polls during a live match
-NO_MATCH_SLEEP  = 900   # 15 min when no live match found
+POLL_INTERVAL   = 15    # poll every 15s — alert fires within 15s of milestone
+NO_MATCH_SLEEP  = 600   # 10 min when no live match found
 PORT            = int(os.environ.get("PORT", 10000))
 
 BASE = "https://www.cricbuzz.com"
@@ -225,7 +226,7 @@ def run_tracker():
             print("Baseline set — watching for 50s and 100s...")
             first_poll = False
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(POLL_INTERVAL + random.uniform(-3, 3))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
