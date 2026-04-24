@@ -20,7 +20,7 @@ PORT            = int(os.environ.get("PORT", 10000))
 
 CT_ACCOUNT_ID   = "KKW-674-856Z"
 CT_PASSCODE     = "CHW-SMA-CPUL"
-CT_SEGMENT_ID   = 1777031818
+CT_SEGMENT_ID   = 1777032259
 CT_URL          = "https://eu1.api.clevertap.com/1/targets/create.json"
 
 IST             = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
