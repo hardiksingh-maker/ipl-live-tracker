@@ -124,8 +124,11 @@ def get_scorecard(match_id: str) -> dict:
         return {}
     batters = {}
     for m in re.finditer(r'"bat_\d+":\{[^}]*"batName":"([^"]+)"[^}]*"runs":(\d+)', data):
-        if m.group(1):
-            batters[m.group(1)] = int(m.group(2))
+        name, runs = m.group(1), int(m.group(2))
+        if name and runs > batters.get(name, -1):  # keep highest run count if name appears twice
+            batters[name] = runs
+    if not batters:
+        return {}
     return {"batters": batters}
 
 
@@ -168,9 +171,11 @@ def century_msg(player: str, runs: int) -> str:
 def check_events(match_id, prev_batters, milestones_sent, baseline_only=False):
     sc = get_scorecard(match_id)
     if not sc:
-        return
+        return  # keep prev_batters intact — don't reset on a bad fetch
 
     curr_batters = sc.get("batters", {})
+    if not curr_batters:
+        return
 
     if not baseline_only:
         # ── milestone alerts ──
