@@ -13,7 +13,6 @@ import os
 
 TELEGRAM_TOKEN  = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
 CHAT_IDS        = ["5023801264", "1372959952"]
-COUPON_CODE     = "X"           # ← change to your actual coupon code
 POLL_INTERVAL   = 15            # seconds — alert fires within 15s of milestone
 NO_MATCH_SLEEP  = 600           # 10 min when no live match
 PORT            = int(os.environ.get("PORT", 10000))
@@ -178,28 +177,33 @@ def is_match_complete(match_id: str) -> bool:
 
 # ── Alert messages ────────────────────────────────────────────────────────────
 
+def _coupon(name: str, milestone: int) -> str:
+    last = name.strip().split()[-1].upper()
+    return f"{last}{milestone}"
+
 def powerplay_msg(team: str, pp_runs: int, pp_wkts: int) -> str:
+    code = f"{team.upper()}PP"
     return (
-        f"🏏 <b>{team}</b> Scored <b>{pp_runs}/{pp_wkts}</b> in Power Play.\n"
-        f"Buy 6 months pro and get 12 months Free access. ⚡\n"
-        f"Don't miss the IPL FLASH deal.\n"
-        f"Grab now."
+        f"🏏 𝗣𝗼𝘄𝗲𝗿𝗣𝗹𝗮𝘆 𝗯𝘆 {team} 🚀\n"
+        f"Scored <b>{pp_runs}/{pp_wkts}</b> in 6 overs!\n"
+        f"Big moves need perfect timing — just like trading 👀 📊 "
+        f"Unlock Univest Pro Access Now ⚡ 6+9 Months FREE | Code: {code} ⏳ Only 15 mins left!"
     )
 
 def fifty_msg(player: str, runs: int) -> str:
+    code = _coupon(player, 50)
     return (
-        f"🏏 <b>{player}</b> Scored <b>50</b>. You Hit 18 Months\n"
-        f"Buy 6 Months Pro + 12 Months FREE—claim Flash offer between overs. ⚡️\n"
-        f"Apply coupon code: <b>{COUPON_CODE}</b>\n"
-        f"Tap and claim now."
+        f"🌟 𝗙𝗶𝗳𝘁𝘆 𝗯𝘆 {player} 🚀\n"
+        f"Big moves need perfect timing — just like trading 👀 📊 "
+        f"Unlock Univest Pro Access Now ⚡ 6+9 Months FREE | Code: {code} ⏳ Only 15 mins left!"
     )
 
 def century_msg(player: str, runs: int) -> str:
+    code = _coupon(player, 100)
     return (
-        f"🏏 <b>{player}</b> Scored <b>100</b>. You Hit 18 Months\n"
-        f"Buy 6 Months Pro + 12 Months FREE—claim Flash offer between overs. ⚡️\n"
-        f"Apply coupon code: <b>{COUPON_CODE}</b>\n"
-        f"Tap and claim now."
+        f"💯 𝗖𝗲𝗻𝘁𝘂𝗿𝘆 𝗯𝘆 {player} 🚀\n"
+        f"Big moves need perfect timing — just like trading 👀 📊 "
+        f"Unlock Univest Pro Access Now ⚡ 6+9 Months FREE | Code: {code} ⏳ Only 15 mins left!"
     )
 
 
