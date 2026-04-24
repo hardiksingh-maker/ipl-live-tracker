@@ -17,6 +17,10 @@ POLL_INTERVAL   = 15            # seconds — alert fires within 15s of mileston
 NO_MATCH_SLEEP  = 600           # 10 min when no live match
 PORT            = int(os.environ.get("PORT", 10000))
 
+CT_ACCOUNT_ID   = "KKW-674-856Z"
+CT_PASSCODE     = "CHW-SMA-CPUL"
+CT_URL          = "https://api.clevertap.com/1/targets/create.json"
+
 BASE = "https://www.cricbuzz.com"
 HDR  = {
     "User-Agent": (
@@ -53,7 +57,7 @@ def self_ping():
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
-def send_alert(text: str):
+def send_telegram(text: str):
     for chat_id in CHAT_IDS:
         try:
             requests.post(
@@ -63,6 +67,40 @@ def send_alert(text: str):
             )
         except Exception as e:
             print(f"[Telegram error] {e}")
+
+
+# ── CleverTap ─────────────────────────────────────────────────────────────────
+
+def send_clevertap(title: str, body: str):
+    try:
+        r = requests.post(
+            CT_URL,
+            headers={
+                "X-CleverTap-Account-Id": CT_ACCOUNT_ID,
+                "X-CleverTap-Passcode":   CT_PASSCODE,
+                "Content-Type":           "application/json",
+            },
+            json={
+                "name":    f"{title[:40]} — {int(time.time())}",
+                "when":    "now",
+                "where":   {"common_profile_prop": {"profile_fields": []}},
+                "content": {"title": title, "body": body},
+                "devices": ["android", "ios"],
+            },
+            timeout=10,
+        )
+        print(f"[CleverTap] {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        print(f"[CleverTap error] {e}")
+
+
+# ── Combined alert ────────────────────────────────────────────────────────────
+
+def send_alert(text: str):
+    send_telegram(text)
+    lines = re.sub(r"<[^>]+>", "", text).strip().splitlines()
+    if len(lines) >= 2:
+        send_clevertap(lines[0].strip(), lines[1].strip())
     print(f"[ALERT] {text.splitlines()[0]}")
 
 
