@@ -86,7 +86,7 @@ def send_clevertap(title: str, body: str):
             json={
                 "name":    f"{title[:40]} — {int(time.time())}",
                 "when":    "now",
-                "segment": CT_SEGMENT_ID,
+                "where":   {"common_profile_prop": {"profile_fields": []}},
                 "content": {"title": title, "body": body},
                 "devices": ["android", "ios"],
             },
