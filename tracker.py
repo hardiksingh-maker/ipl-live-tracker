@@ -75,10 +75,13 @@ def _fetch_rsc(url: str) -> str:
         return ""
 
 
-def get_live_ipl_match() -> tuple:
+DEAD_STATES = {"complete", "preview", "upcoming", ""}
+
+def get_live_match() -> tuple:
     """
     Scrape the Cricbuzz live-scores page.
-    Returns (match_id, match_name) for the first live IPL match, else (None, None).
+    IPL takes priority; falls back to any other live match.
+    Returns (match_id, match_name) or (None, None).
     """
     data = _fetch_rsc(f"{BASE}/cricket-match/live")
     if not data:
@@ -86,32 +89,38 @@ def get_live_ipl_match() -> tuple:
 
     match_ids = list(dict.fromkeys(re.findall(r'"matchId":(\d+)', data)))
 
+    ipl_match = None
+    fallback   = None
+
     for mid in match_ids:
         idx = data.find(f'"matchId":{mid}')
         ctx = data[max(0, idx - 400): idx + 700]
 
-        if "indian premier" not in ctx.lower() and "ipl" not in ctx.lower():
-            continue
-
-        state = (re.search(r'"state":"([^"]+)"', ctx) or ("", ""))[1] if re.search(r'"state":"([^"]+)"', ctx) else ""
         state_val = re.search(r'"state":"([^"]+)"', ctx)
         state_str = state_val.group(1) if state_val else ""
 
-        # Skip not-yet-started or finished matches
-        if state_str.lower() in ("complete", "preview", ""):
+        if state_str.lower() in DEAD_STATES:
             continue
 
-        t1 = re.search(r'"team1".*?"teamSName":"([^"]+)"', ctx)
-        t2 = re.search(r'"team2".*?"teamSName":"([^"]+)"', ctx)
+        t1     = re.search(r'"team1".*?"teamSName":"([^"]+)"', ctx)
+        t2     = re.search(r'"team2".*?"teamSName":"([^"]+)"', ctx)
         series = re.search(r'"seriesName":"([^"]+)"', ctx)
-        t1n = t1.group(1) if t1 else "?"
-        t2n = t2.group(1) if t2 else "?"
-        sn  = series.group(1) if series else "IPL 2026"
+        t1n    = t1.group(1) if t1 else "?"
+        t2n    = t2.group(1) if t2 else "?"
+        sn     = series.group(1) if series else "?"
+        name   = f"{t1n} vs {t2n} — {sn}"
 
-        print(f"[Live] {mid}: {t1n} vs {t2n} | {state_str}")
-        return mid, f"{t1n} vs {t2n} — {sn}"
+        is_ipl = "indian premier" in ctx.lower() or "ipl" in sn.lower()
+        if is_ipl:
+            ipl_match = (mid, name)
+            break
+        if fallback is None:
+            fallback = (mid, name)
 
-    return None, None
+    result = ipl_match or fallback
+    if result:
+        print(f"[Live] matchId={result[0]}: {result[1]}")
+    return result if result else (None, None)
 
 
 def get_batting_scores(match_id: str) -> dict:
@@ -190,7 +199,7 @@ def run_tracker():
     while True:
         # Find live IPL match
         if not match_id:
-            new_id, new_name = get_live_ipl_match()
+            new_id, new_name = get_live_match()
             if not new_id:
                 print(f"No live IPL match. Checking again in {NO_MATCH_SLEEP // 60} min...")
                 time.sleep(NO_MATCH_SLEEP)
