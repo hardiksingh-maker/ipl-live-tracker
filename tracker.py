@@ -119,50 +119,14 @@ def get_live_match() -> tuple:
 
 
 def get_scorecard(match_id: str) -> dict:
-    """
-    Returns:
-      batters   : {name: runs}
-      innings   : [{team, overs, runs, wickets, pp_runs, pp_wkts}]
-    """
     data = _fetch_rsc(f"{BASE}/live-cricket-scorecard/{match_id}")
     if not data:
         return {}
-
-    # ── batters ──
     batters = {}
     for m in re.finditer(r'"bat_\d+":\{[^}]*"batName":"([^"]+)"[^}]*"runs":(\d+)', data):
         if m.group(1):
             batters[m.group(1)] = int(m.group(2))
-
-    # ── innings list ──
-    innings = []
-    # Each inning block contains batTeamShortName, scoreDetails, ppData, wicketsData
-    for inning_block in re.finditer(
-        r'"batTeamShortName":"([^"]+)".*?"scoreDetails":\{([^}]+)\}.*?"ppData":\{"pp_1":\{([^}]+)\}',
-        data, re.DOTALL
-    ):
-        team     = inning_block.group(1)
-        sd_raw   = inning_block.group(2)
-        pp_raw   = inning_block.group(3)
-
-        overs    = float(re.search(r'"overs":([\d.]+)', sd_raw).group(1)) if re.search(r'"overs":([\d.]+)', sd_raw) else 0
-        runs     = int(re.search(r'"runs":(\d+)',    sd_raw).group(1)) if re.search(r'"runs":(\d+)',    sd_raw) else 0
-        wickets  = int(re.search(r'"wickets":(\d+)', sd_raw).group(1)) if re.search(r'"wickets":(\d+)', sd_raw) else 0
-        pp_runs  = int(re.search(r'"runsScored":(\d+)', pp_raw).group(1)) if re.search(r'"runsScored":(\d+)', pp_raw) else 0
-
-        # count wickets that fell in first 6 overs
-        pp_wkts = len(re.findall(r'"wktOver":([\d.]+)', inning_block.group(0)))
-        # filter to only overs <= 6
-        pp_wkts = sum(1 for ov in re.findall(r'"wktOver":([\d.]+)', inning_block.group(0))
-                      if float(ov) <= 6.0)
-
-        innings.append({
-            "team": team, "overs": overs,
-            "runs": runs, "wickets": wickets,
-            "pp_runs": pp_runs, "pp_wkts": pp_wkts,
-        })
-
-    return {"batters": batters, "innings": innings}
+    return {"batters": batters}
 
 
 def is_match_complete(match_id: str) -> bool:
@@ -181,14 +145,6 @@ def _coupon(name: str, milestone: int) -> str:
     last = name.strip().split()[-1].upper()
     return f"{last}{milestone}"
 
-def powerplay_msg(team: str, pp_runs: int, pp_wkts: int) -> str:
-    code = f"{team.upper()}PP"
-    return (
-        f"🏏 𝗣𝗼𝘄𝗲𝗿𝗣𝗹𝗮𝘆 𝗯𝘆 {team} 🚀\n"
-        f"Scored <b>{pp_runs}/{pp_wkts}</b> in 6 overs!\n"
-        f"Big moves need perfect timing — just like trading 👀 📊 "
-        f"Unlock Univest Pro Access Now ⚡ 6+9 Months FREE | Code: {code} ⏳ Only 15 mins left!"
-    )
 
 def fifty_msg(player: str, runs: int) -> str:
     code = _coupon(player, 50)
@@ -209,23 +165,14 @@ def century_msg(player: str, runs: int) -> str:
 
 # ── Event detection ───────────────────────────────────────────────────────────
 
-def check_events(match_id, prev_batters, milestones_sent, pp_sent, baseline_only=False):
+def check_events(match_id, prev_batters, milestones_sent, baseline_only=False):
     sc = get_scorecard(match_id)
     if not sc:
         return
 
     curr_batters = sc.get("batters", {})
-    innings      = sc.get("innings", [])
 
     if not baseline_only:
-        # ── powerplay alerts ──
-        for inning in innings:
-            team = inning["team"]
-            key  = f"pp_{team}"
-            if inning["overs"] >= 6.0 and inning["pp_runs"] > 0 and key not in pp_sent:
-                send_alert(powerplay_msg(team, inning["pp_runs"], inning["pp_wkts"]))
-                pp_sent.add(key)
-
         # ── milestone alerts ──
         for name, runs in curr_batters.items():
             prev_r = prev_batters.get(name, 0)
@@ -246,12 +193,11 @@ def check_events(match_id, prev_batters, milestones_sent, pp_sent, baseline_only
 
 def run_tracker():
     print("🏏 IPL Tracker started (no API key)")
-    send_alert("🏏 <b>IPL Tracker active!</b>\nAlerts: Power Play score · 50s · 100s")
+    send_alert("🏏 <b>IPL Tracker active!</b>\nAlerts: 50s · 100s")
 
     match_id, match_name = None, None
     prev_batters:    dict = {}
     milestones_sent: set  = set()
-    pp_sent:         set  = set()
     first_poll            = False
 
     while True:
@@ -265,7 +211,6 @@ def run_tracker():
             send_alert(f"🏏 <b>Match Started!</b>\n{match_name}")
             prev_batters.clear()
             milestones_sent.clear()
-            pp_sent.clear()
             first_poll = True
 
         if is_match_complete(match_id):
@@ -274,10 +219,10 @@ def run_tracker():
             time.sleep(NO_MATCH_SLEEP)
             continue
 
-        check_events(match_id, prev_batters, milestones_sent, pp_sent,
+        check_events(match_id, prev_batters, milestones_sent,
                      baseline_only=first_poll)
         if first_poll:
-            print("Baseline set — watching for power play, 50s and 100s...")
+            print("Baseline set — watching for 50s and 100s...")
             first_poll = False
 
         time.sleep(POLL_INTERVAL + random.uniform(-3, 3))
