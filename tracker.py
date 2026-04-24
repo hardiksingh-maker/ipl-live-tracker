@@ -7,6 +7,7 @@ import re
 import time
 import random
 import threading
+import datetime
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
@@ -21,6 +22,14 @@ CT_ACCOUNT_ID   = "KKW-674-856Z"
 CT_PASSCODE     = "CHW-SMA-CPUL"
 CT_SEGMENT_ID   = 1777031818
 CT_URL          = "https://eu1.api.clevertap.com/1/targets/create.json"
+
+IST             = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+PUSH_AFTER_IST  = (20, 20)   # 8:20 PM — no push before this
+PUSH_DELAY      = 600        # 10-min delay after milestone detection
+MAX_PUSHES      = 3          # max CleverTap pushes per match
+
+_push_count = 0
+_push_lock  = threading.Lock()
 
 BASE = "https://www.cricbuzz.com"
 HDR  = {
@@ -99,11 +108,29 @@ def send_clevertap(title: str, body: str):
 
 # ── Combined alert ────────────────────────────────────────────────────────────
 
+def _schedule_clevertap(title: str, body: str):
+    """Delay 10 min, then send only if after 8:20 PM and under push cap."""
+    def _fire():
+        global _push_count
+        time.sleep(PUSH_DELAY)
+        now = datetime.datetime.now(IST)
+        with _push_lock:
+            if (now.hour, now.minute) < PUSH_AFTER_IST:
+                print(f"[CT SKIP] {now.strftime('%H:%M')} IST — before 8:20 PM")
+                return
+            if _push_count >= MAX_PUSHES:
+                print(f"[CT SKIP] Max {MAX_PUSHES} pushes reached")
+                return
+            send_clevertap(title, body)
+            _push_count += 1
+            print(f"[CT] Push {_push_count}/{MAX_PUSHES} sent")
+    threading.Thread(target=_fire, daemon=True).start()
+
 def send_alert(text: str):
     send_telegram(text)
     lines = re.sub(r"<[^>]+>", "", text).strip().splitlines()
     if len(lines) >= 2:
-        send_clevertap(lines[0].strip(), lines[1].strip())
+        _schedule_clevertap(lines[0].strip(), lines[1].strip())
     print(f"[ALERT] {text.splitlines()[0]}")
 
 
@@ -253,6 +280,8 @@ def run_tracker():
             send_alert(f"🏏 <b>Match Started!</b>\n{match_name}")
             prev_batters.clear()
             milestones_sent.clear()
+            global _push_count
+            _push_count = 0
             first_poll = True
 
         if is_match_complete(match_id):
