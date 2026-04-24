@@ -109,32 +109,14 @@ def get_scorecard(match_id: str) -> dict:
 # ── State extraction ──────────────────────────────────────────────────────────
 
 def extract_batting(sc: dict) -> dict:
-    """Returns {name: {r, fours, sixes}} for all batters in all innings."""
+    """Returns {name: {r}} for all batters in all innings."""
     batters = {}
     for inning in sc.get("scorecard", []):
         for b in inning.get("batTeamDetails", {}).get("batsmenData", {}).values():
             name = b.get("batName", "")
             if name:
-                batters[name] = {
-                    "r":     int(b.get("runs", 0) or 0),
-                    "fours": int(b.get("fours", 0) or 0),
-                    "sixes": int(b.get("sixes", 0) or 0),
-                }
+                batters[name] = {"r": int(b.get("runs", 0) or 0)}
     return batters
-
-
-def extract_scores(sc: dict) -> dict:
-    """Returns {inning_label: {r, w}} from scorecard innings headers."""
-    scores = {}
-    for inning in sc.get("scorecard", []):
-        label = inning.get("batTeamDetails", {}).get("batTeamName", "")
-        score_details = inning.get("scoreDetails", {})
-        if label:
-            scores[label] = {
-                "r": int(score_details.get("runs", 0) or 0),
-                "w": int(score_details.get("wickets", 0) or 0),
-            }
-    return scores
 
 
 def is_match_complete(sc: dict) -> bool:
@@ -144,55 +126,33 @@ def is_match_complete(sc: dict) -> bool:
 
 # ── Event detection ───────────────────────────────────────────────────────────
 
-def check_events(sc, match_name, prev_batters, prev_scores,
-                 milestones_sent, baseline_only=False):
+def check_events(sc, match_name, prev_batters, milestones_sent, baseline_only=False):
     curr_batters = extract_batting(sc)
-    curr_scores  = extract_scores(sc)
 
     if not baseline_only:
-        # Wickets
-        for inning, curr in curr_scores.items():
-            prev_w = prev_scores.get(inning, {}).get("w", 0)
-            if curr["w"] > prev_w:
-                for _ in range(curr["w"] - prev_w):
-                    send_alert(
-                        f"🔴 WICKET!\n<b>{match_name}</b>\n"
-                        f"{inning}: {curr['r']}/{curr['w']}"
-                    )
-
-        # Per-batter events
         for name, curr in curr_batters.items():
-            prev = prev_batters.get(name, {"r": 0, "fours": 0, "sixes": 0})
-
-            for _ in range(max(0, curr["sixes"] - prev["sixes"])):
-                send_alert(f"💥 SIX!\n<b>{name}</b> hits it out of the park!\nScore: {curr['r']} runs")
-
-            for _ in range(max(0, curr["fours"] - prev["fours"])):
-                send_alert(f"🏏 FOUR!\n<b>{name}</b> finds the boundary!\nScore: {curr['r']} runs")
+            prev = prev_batters.get(name, {"r": 0})
 
             if prev["r"] < 50 <= curr["r"] and f"{name}_50" not in milestones_sent:
-                send_alert(f"🌟 FIFTY!\n<b>{name}</b> reaches 50 runs! ({curr['r']}*)")
+                send_alert(f"🌟 FIFTY!\n<b>{name}</b> reaches 50 runs! ({curr['r']}*)\n<b>{match_name}</b>")
                 milestones_sent.add(f"{name}_50")
 
             if prev["r"] < 100 <= curr["r"] and f"{name}_100" not in milestones_sent:
-                send_alert(f"💯 CENTURY!\n<b>{name}</b> scores a HUNDRED! ({curr['r']}*)")
+                send_alert(f"💯 CENTURY!\n<b>{name}</b> scores a HUNDRED! ({curr['r']}*)\n<b>{match_name}</b>")
                 milestones_sent.add(f"{name}_100")
 
     prev_batters.clear()
     prev_batters.update(curr_batters)
-    prev_scores.clear()
-    prev_scores.update(curr_scores)
 
 
 # ── Tracker loop ──────────────────────────────────────────────────────────────
 
 def run_tracker():
     print("🏏 IPL Live Tracker started (Cricbuzz API)")
-    send_alert("🏏 <b>IPL Live Tracker is now active!</b>\nWatching for 4s, 6s, wickets, and milestones.")
+    send_alert("🏏 <b>IPL Live Tracker is now active!</b>\nWatching for 50s and 100s.")
 
     match_id, match_name = None, None
     prev_batters:    dict = {}
-    prev_scores:     dict = {}
     milestones_sent: set  = set()
     ended_ids:       set  = set()
     first_poll       = False
@@ -214,7 +174,7 @@ def run_tracker():
                 match_id, match_name = new_id, new_name
                 print(f"Found: {match_name}  (id={match_id})")
                 send_alert(f"🏏 <b>Match Found!</b>\n{match_name}")
-                prev_batters.clear(); prev_scores.clear(); milestones_sent.clear()
+                prev_batters.clear(); milestones_sent.clear()
                 first_poll = True
 
             elif new_id and new_id != match_id:
@@ -224,7 +184,7 @@ def run_tracker():
                     print(f"IPL detected! Switching → {new_name}")
                     send_alert(f"🏏 <b>Switching to IPL!</b>\n{new_name}")
                     match_id, match_name = new_id, new_name
-                    prev_batters.clear(); prev_scores.clear(); milestones_sent.clear()
+                    prev_batters.clear(); milestones_sent.clear()
                     first_poll = True
 
         # Fetch scorecard
@@ -240,8 +200,7 @@ def run_tracker():
             time.sleep(NO_MATCH_SLEEP)
             continue
 
-        check_events(sc, match_name, prev_batters, prev_scores,
-                     milestones_sent, baseline_only=first_poll)
+        check_events(sc, match_name, prev_batters, milestones_sent, baseline_only=first_poll)
 
         if first_poll:
             print("Baseline set — watching for new events...")
