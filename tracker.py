@@ -9,8 +9,9 @@ CRICAPI_KEY    = "6da89c9a-acab-4c50-a909-cfbba5636fe4"
 CRICAPI_BASE   = "https://api.cricapi.com/v1"
 TELEGRAM_TOKEN = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
 CHAT_IDS       = ["5023801264", "1372959952"]
-POLL_INTERVAL  = 150   # 2.5 min — keeps usage under 100 calls/day free limit
-IPL_CHECK_EVERY = 6    # re-check for IPL every 6 polls (~15 min)
+POLL_INTERVAL   = 200   # 3.3 min during live match
+NO_MATCH_SLEEP  = 3600  # 1 hr when idle — keeps total API calls ~90/day on free plan
+IPL_CHECK_EVERY = 12    # re-check for IPL upgrade every 12 polls (~40 min)
 PORT           = int(os.environ.get("PORT", 10000))
 
 
@@ -182,8 +183,8 @@ def run_tracker():
 
             if not match_id:
                 if not new_id:
-                    print("No live match found. Retrying in 60s...")
-                    time.sleep(60)
+                    print(f"No live match found. Retrying in {NO_MATCH_SLEEP//60} min...")
+                    time.sleep(NO_MATCH_SLEEP)
                     continue
                 match_id, match_name = new_id, new_name
                 print(f"Found: {match_name}  (id={match_id})")
@@ -216,7 +217,7 @@ def run_tracker():
             send_alert(f"🏁 <b>Match Ended!</b>\n{match_name}")
             ended_ids.add(match_id)
             match_id, match_name = None, None
-            time.sleep(60)
+            time.sleep(NO_MATCH_SLEEP)
             continue
 
         check_events(data, match_name, prev_batters, prev_scores,
