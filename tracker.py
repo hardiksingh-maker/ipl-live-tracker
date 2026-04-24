@@ -45,14 +45,16 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
+RENDER_URL = "https://ipl-live-tracker.onrender.com"
+
 def self_ping():
     time.sleep(60)
     while True:
         try:
-            requests.get(f"http://localhost:{PORT}", timeout=5)
+            requests.get(RENDER_URL, timeout=10)
         except Exception:
             pass
-        time.sleep(300)
+        time.sleep(240)  # every 4 min — well under Render's 15-min sleep threshold
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
