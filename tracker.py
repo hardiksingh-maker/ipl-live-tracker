@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-import requests
+"""
+IPL Live Tracker — no API key required.
+Scrapes live match data directly from Cricbuzz pages.
+Sends Telegram alerts when any batter reaches 50 or 100.
+"""
+import re
 import time
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
 
-RAPIDAPI_KEY   = "9dbddf380emsh7cf8e17e473544bp173af4jsn314853b48f43"
-CRICBUZZ_HOST  = "cricbuzz-cricket.p.rapidapi.com"
-CRICBUZZ_BASE  = f"https://{CRICBUZZ_HOST}"
-TELEGRAM_TOKEN = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
-CHAT_IDS       = ["5023801264", "1372959952"]
-POLL_INTERVAL  = 60     # 1 min during live match — Cricbuzz allows more calls
-NO_MATCH_SLEEP = 1800   # 30 min when no live match
-IPL_CHECK_EVERY = 10    # re-check for IPL upgrade every 10 polls (~10 min)
-PORT           = int(os.environ.get("PORT", 10000))
+TELEGRAM_TOKEN  = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
+CHAT_IDS        = ["5023801264", "1372959952"]
+POLL_INTERVAL   = 60    # seconds between scorecard polls during a live match
+NO_MATCH_SLEEP  = 900   # 15 min when no live match found
+PORT            = int(os.environ.get("PORT", 10000))
 
-HEADERS = {
-    "X-RapidAPI-Key":  RAPIDAPI_KEY,
-    "X-RapidAPI-Host": CRICBUZZ_HOST,
+BASE = "https://www.cricbuzz.com"
+HDR  = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.cricbuzz.com/",
 }
 
 
@@ -27,7 +34,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"IPL Tracker is running")
+        self.wfile.write(b"IPL Tracker running")
     def log_message(self, *args):
         pass
 
@@ -46,99 +53,123 @@ def send_alert(text: str):
                 timeout=10,
             )
         except Exception as e:
-            print(f"[Telegram error] chat={chat_id}: {e}")
+            print(f"[Telegram error] {e}")
     print(f"[ALERT] {text.splitlines()[0]}")
 
 
-# ── Cricbuzz helpers ──────────────────────────────────────────────────────────
+# ── Cricbuzz scraper ──────────────────────────────────────────────────────────
 
-def get_live_matches() -> list:
-    """Return list of live match dicts from Cricbuzz."""
+def _fetch_rsc(url: str) -> str:
+    """Fetch a Cricbuzz page and return the combined React Server Components data."""
     try:
-        r = requests.get(f"{CRICBUZZ_BASE}/matches/v1/live", headers=HEADERS, timeout=10)
-        data = r.json()
-        matches = []
-        for tm in data.get("typeMatches", []):
-            for sm in tm.get("seriesMatches", []):
-                wrapper = sm.get("seriesAdWrapper", {})
-                for m in wrapper.get("matches", []):
-                    info = m.get("matchInfo", {})
-                    score = m.get("matchScore", {})
-                    matches.append({"info": info, "score": score, "series": wrapper.get("seriesName", "")})
-        print(f"[API] live matches: {len(matches)}")
-        return matches
+        r = requests.get(url, headers=HDR, timeout=15)
+        chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.+?)"\]\)', r.text, re.DOTALL)
+        combined = "".join(chunks)
+        try:
+            combined = combined.encode().decode("unicode_escape")
+        except Exception:
+            pass
+        return combined
     except Exception as e:
-        print(f"[API error] {e}")
-        return []
+        print(f"[Fetch error] {url}: {e}")
+        return ""
 
 
-def find_match(matches: list, skip_ids: set):
-    """IPL takes priority; falls back to first live match."""
-    fallback = None
-    for m in matches:
-        info = m["info"]
-        mid  = str(info.get("matchId", ""))
-        series = m["series"]
-        t1   = info.get("team1", {}).get("teamSName", "?")
-        t2   = info.get("team2", {}).get("teamSName", "?")
-        name = f"{t1} vs {t2} — {series}"
-        if mid in skip_ids:
+def get_live_ipl_match() -> tuple:
+    """
+    Scrape the Cricbuzz live-scores page.
+    Returns (match_id, match_name) for the first live IPL match, else (None, None).
+    """
+    data = _fetch_rsc(f"{BASE}/cricket-match/live")
+    if not data:
+        return None, None
+
+    match_ids = list(dict.fromkeys(re.findall(r'"matchId":(\d+)', data)))
+
+    for mid in match_ids:
+        idx = data.find(f'"matchId":{mid}')
+        ctx = data[max(0, idx - 400): idx + 700]
+
+        if "indian premier" not in ctx.lower() and "ipl" not in ctx.lower():
             continue
-        state = info.get("state", "").lower()
-        if state in ("complete", "preview", ""):
+
+        state = (re.search(r'"state":"([^"]+)"', ctx) or ("", ""))[1] if re.search(r'"state":"([^"]+)"', ctx) else ""
+        state_val = re.search(r'"state":"([^"]+)"', ctx)
+        state_str = state_val.group(1) if state_val else ""
+
+        # Skip not-yet-started or finished matches
+        if state_str.lower() in ("complete", "preview", ""):
             continue
-        if "indian premier" in series.lower() or "ipl" in series.lower():
-            return mid, name
-        if fallback is None:
-            fallback = (mid, name)
-    return fallback if fallback else (None, None)
+
+        t1 = re.search(r'"team1".*?"teamSName":"([^"]+)"', ctx)
+        t2 = re.search(r'"team2".*?"teamSName":"([^"]+)"', ctx)
+        series = re.search(r'"seriesName":"([^"]+)"', ctx)
+        t1n = t1.group(1) if t1 else "?"
+        t2n = t2.group(1) if t2 else "?"
+        sn  = series.group(1) if series else "IPL 2026"
+
+        print(f"[Live] {mid}: {t1n} vs {t2n} | {state_str}")
+        return mid, f"{t1n} vs {t2n} — {sn}"
+
+    return None, None
 
 
-def get_scorecard(match_id: str) -> dict:
-    try:
-        r = requests.get(
-            f"{CRICBUZZ_BASE}/mcenter/v1/{match_id}/hscard",
-            headers=HEADERS, timeout=10,
-        )
-        return r.json()
-    except Exception as e:
-        print(f"[Scorecard error] {e}")
+def get_batting_scores(match_id: str) -> dict:
+    """
+    Scrape the scorecard page and return {player_name: runs} for all batters.
+    """
+    data = _fetch_rsc(f"{BASE}/live-cricket-scorecard/{match_id}")
+    if not data:
         return {}
 
-
-# ── State extraction ──────────────────────────────────────────────────────────
-
-def extract_batting(sc: dict) -> dict:
-    """Returns {name: {r}} for all batters in all innings."""
     batters = {}
-    for inning in sc.get("scorecard", []):
-        for b in inning.get("batTeamDetails", {}).get("batsmenData", {}).values():
-            name = b.get("batName", "")
-            if name:
-                batters[name] = {"r": int(b.get("runs", 0) or 0)}
+    # Each batter object looks like:
+    # "bat_1":{"batId":...,"batName":"Virat Kohli",...,"runs":72,...}
+    for m in re.finditer(
+        r'"bat_\d+":\{[^}]*"batName":"([^"]+)"[^}]*"runs":(\d+)', data
+    ):
+        name = m.group(1)
+        runs = int(m.group(2))
+        batters[name] = {"r": runs}
+
     return batters
 
 
-def is_match_complete(sc: dict) -> bool:
-    header = sc.get("matchHeader", {})
-    return header.get("complete", False) or header.get("state", "") == "complete"
+def is_match_complete(match_id: str) -> bool:
+    """Check if the match has ended by re-reading the live page."""
+    data = _fetch_rsc(f"{BASE}/cricket-match/live")
+    idx = data.find(f'"matchId":{match_id}')
+    if idx == -1:
+        return True   # no longer in live list → treat as ended
+    ctx = data[max(0, idx - 100): idx + 300]
+    state = re.search(r'"state":"([^"]+)"', ctx)
+    return state.group(1).lower() in ("complete",) if state else False
 
 
 # ── Event detection ───────────────────────────────────────────────────────────
 
-def check_events(sc, match_name, prev_batters, milestones_sent, baseline_only=False):
-    curr_batters = extract_batting(sc)
+def check_milestones(match_id, match_name, prev_batters, milestones_sent,
+                     baseline_only=False):
+    curr_batters = get_batting_scores(match_id)
+    if not curr_batters:
+        return
 
     if not baseline_only:
         for name, curr in curr_batters.items():
-            prev = prev_batters.get(name, {"r": 0})
+            prev_r = prev_batters.get(name, {}).get("r", 0)
 
-            if prev["r"] < 50 <= curr["r"] and f"{name}_50" not in milestones_sent:
-                send_alert(f"🌟 FIFTY!\n<b>{name}</b> reaches 50 runs! ({curr['r']}*)\n<b>{match_name}</b>")
+            if prev_r < 50 <= curr["r"] and f"{name}_50" not in milestones_sent:
+                send_alert(
+                    f"🌟 FIFTY!\n<b>{name}</b> reaches 50 runs! ({curr['r']}*)\n"
+                    f"<b>{match_name}</b>"
+                )
                 milestones_sent.add(f"{name}_50")
 
-            if prev["r"] < 100 <= curr["r"] and f"{name}_100" not in milestones_sent:
-                send_alert(f"💯 CENTURY!\n<b>{name}</b> scores a HUNDRED! ({curr['r']}*)\n<b>{match_name}</b>")
+            if prev_r < 100 <= curr["r"] and f"{name}_100" not in milestones_sent:
+                send_alert(
+                    f"💯 CENTURY!\n<b>{name}</b> scores a HUNDRED! ({curr['r']}*)\n"
+                    f"<b>{match_name}</b>"
+                )
                 milestones_sent.add(f"{name}_100")
 
     prev_batters.clear()
@@ -148,62 +179,41 @@ def check_events(sc, match_name, prev_batters, milestones_sent, baseline_only=Fa
 # ── Tracker loop ──────────────────────────────────────────────────────────────
 
 def run_tracker():
-    print("🏏 IPL Live Tracker started (Cricbuzz API)")
-    send_alert("🏏 <b>IPL Live Tracker is now active!</b>\nWatching for 50s and 100s.")
+    print("🏏 IPL Milestone Tracker started (no API key)")
+    send_alert("🏏 <b>IPL Milestone Tracker active!</b>\nAlerts for 50s and 100s only.")
 
     match_id, match_name = None, None
     prev_batters:    dict = {}
     milestones_sent: set  = set()
-    ended_ids:       set  = set()
-    first_poll       = False
-    poll_count       = 0
+    first_poll            = False
 
     while True:
-        poll_count += 1
+        # Find live IPL match
+        if not match_id:
+            new_id, new_name = get_live_ipl_match()
+            if not new_id:
+                print(f"No live IPL match. Checking again in {NO_MATCH_SLEEP // 60} min...")
+                time.sleep(NO_MATCH_SLEEP)
+                continue
+            match_id, match_name = new_id, new_name
+            print(f"Found: {match_name}  (id={match_id})")
+            send_alert(f"🏏 <b>IPL Match Started!</b>\n{match_name}")
+            prev_batters.clear()
+            milestones_sent.clear()
+            first_poll = True
 
-        # Find / upgrade match
-        if not match_id or poll_count % IPL_CHECK_EVERY == 0:
-            live = get_live_matches()
-            new_id, new_name = find_match(live, skip_ids=ended_ids)
-
-            if not match_id:
-                if not new_id:
-                    print(f"No live match. Retrying in {NO_MATCH_SLEEP//60} min...")
-                    time.sleep(NO_MATCH_SLEEP)
-                    continue
-                match_id, match_name = new_id, new_name
-                print(f"Found: {match_name}  (id={match_id})")
-                send_alert(f"🏏 <b>Match Found!</b>\n{match_name}")
-                prev_batters.clear(); milestones_sent.clear()
-                first_poll = True
-
-            elif new_id and new_id != match_id:
-                curr_is_ipl = "indian premier" in match_name.lower() or "ipl" in match_name.lower()
-                new_is_ipl  = "indian premier" in new_name.lower()  or "ipl" in new_name.lower()
-                if new_is_ipl and not curr_is_ipl:
-                    print(f"IPL detected! Switching → {new_name}")
-                    send_alert(f"🏏 <b>Switching to IPL!</b>\n{new_name}")
-                    match_id, match_name = new_id, new_name
-                    prev_batters.clear(); milestones_sent.clear()
-                    first_poll = True
-
-        # Fetch scorecard
-        sc = get_scorecard(match_id)
-        if not sc:
-            time.sleep(POLL_INTERVAL)
-            continue
-
-        if is_match_complete(sc):
+        # Check if match ended
+        if is_match_complete(match_id):
             send_alert(f"🏁 <b>Match Ended!</b>\n{match_name}")
-            ended_ids.add(match_id)
             match_id, match_name = None, None
             time.sleep(NO_MATCH_SLEEP)
             continue
 
-        check_events(sc, match_name, prev_batters, milestones_sent, baseline_only=first_poll)
-
+        # Poll milestones
+        check_milestones(match_id, match_name, prev_batters, milestones_sent,
+                         baseline_only=first_poll)
         if first_poll:
-            print("Baseline set — watching for new events...")
+            print("Baseline set — watching for 50s and 100s...")
             first_poll = False
 
         time.sleep(POLL_INTERVAL)
@@ -213,5 +223,5 @@ def run_tracker():
 
 if __name__ == "__main__":
     threading.Thread(target=start_health_server, daemon=True).start()
-    print(f"Health server running on port {PORT}")
+    print(f"Health server on port {PORT}")
     run_tracker()
