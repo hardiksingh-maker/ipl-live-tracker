@@ -5,14 +5,20 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
 
-CRICAPI_KEY    = "6da89c9a-acab-4c50-a909-cfbba5636fe4"
-CRICAPI_BASE   = "https://api.cricapi.com/v1"
+RAPIDAPI_KEY   = "9dbddf380emsh7cf8e17e473544bp173af4jsn314853b48f43"
+CRICBUZZ_HOST  = "cricbuzz-cricket.p.rapidapi.com"
+CRICBUZZ_BASE  = f"https://{CRICBUZZ_HOST}"
 TELEGRAM_TOKEN = "8718609997:AAGlMGxsgZSv0PlPTzqMl_R29NQ-bf3-STI"
 CHAT_IDS       = ["5023801264", "1372959952"]
-POLL_INTERVAL   = 200   # 3.3 min during live match
-NO_MATCH_SLEEP  = 3600  # 1 hr when idle — keeps total API calls ~90/day on free plan
-IPL_CHECK_EVERY = 12    # re-check for IPL upgrade every 12 polls (~40 min)
+POLL_INTERVAL  = 60     # 1 min during live match — Cricbuzz allows more calls
+NO_MATCH_SLEEP = 1800   # 30 min when no live match
+IPL_CHECK_EVERY = 10    # re-check for IPL upgrade every 10 polls (~10 min)
 PORT           = int(os.environ.get("PORT", 10000))
+
+HEADERS = {
+    "X-RapidAPI-Key":  RAPIDAPI_KEY,
+    "X-RapidAPI-Host": CRICBUZZ_HOST,
+}
 
 
 # ── Health check server (required by Render) ──────────────────────────────────
@@ -44,32 +50,44 @@ def send_alert(text: str):
     print(f"[ALERT] {text.splitlines()[0]}")
 
 
-# ── CricAPI helpers ───────────────────────────────────────────────────────────
+# ── Cricbuzz helpers ──────────────────────────────────────────────────────────
 
-def get_current_matches() -> list:
+def get_live_matches() -> list:
+    """Return list of live match dicts from Cricbuzz."""
     try:
-        r = requests.get(
-            f"{CRICAPI_BASE}/currentMatches",
-            params={"apikey": CRICAPI_KEY, "offset": "0"},
-            timeout=10,
-        )
+        r = requests.get(f"{CRICBUZZ_BASE}/matches/v1/live", headers=HEADERS, timeout=10)
         data = r.json()
-        print(f"[API] hits today: {data.get('info', {}).get('hitsToday', '?')} / {data.get('info', {}).get('hitsLimit', '?')}")
-        return data.get("data", [])
+        matches = []
+        for tm in data.get("typeMatches", []):
+            for sm in tm.get("seriesMatches", []):
+                wrapper = sm.get("seriesAdWrapper", {})
+                for m in wrapper.get("matches", []):
+                    info = m.get("matchInfo", {})
+                    score = m.get("matchScore", {})
+                    matches.append({"info": info, "score": score, "series": wrapper.get("seriesName", "")})
+        print(f"[API] live matches: {len(matches)}")
+        return matches
     except Exception as e:
         print(f"[API error] {e}")
         return []
 
 
 def find_match(matches: list, skip_ids: set):
-    """IPL takes priority; falls back to any live match."""
+    """IPL takes priority; falls back to first live match."""
     fallback = None
     for m in matches:
-        mid  = m.get("id", "")
-        name = m.get("name", "")
-        if mid in skip_ids or not m.get("matchStarted") or m.get("matchEnded"):
+        info = m["info"]
+        mid  = str(info.get("matchId", ""))
+        series = m["series"]
+        t1   = info.get("team1", {}).get("teamSName", "?")
+        t2   = info.get("team2", {}).get("teamSName", "?")
+        name = f"{t1} vs {t2} — {series}"
+        if mid in skip_ids:
             continue
-        if "indian premier" in name.lower() or "ipl" in name.lower():
+        state = info.get("state", "").lower()
+        if state in ("complete", "preview", ""):
+            continue
+        if "indian premier" in series.lower() or "ipl" in series.lower():
             return mid, name
         if fallback is None:
             fallback = (mid, name)
@@ -79,11 +97,10 @@ def find_match(matches: list, skip_ids: set):
 def get_scorecard(match_id: str) -> dict:
     try:
         r = requests.get(
-            f"{CRICAPI_BASE}/match_scorecard",
-            params={"apikey": CRICAPI_KEY, "id": match_id},
-            timeout=10,
+            f"{CRICBUZZ_BASE}/mcenter/v1/{match_id}/hscard",
+            headers=HEADERS, timeout=10,
         )
-        return r.json().get("data", {})
+        return r.json()
     except Exception as e:
         print(f"[Scorecard error] {e}")
         return {}
@@ -91,38 +108,46 @@ def get_scorecard(match_id: str) -> dict:
 
 # ── State extraction ──────────────────────────────────────────────────────────
 
-def extract_batting(data: dict) -> dict:
+def extract_batting(sc: dict) -> dict:
+    """Returns {name: {r, fours, sixes}} for all batters in all innings."""
     batters = {}
-    for inning in data.get("scorecard", []):
-        for b in inning.get("batting", []):
-            name = b.get("batsman", {}).get("name", "")
+    for inning in sc.get("scorecard", []):
+        for b in inning.get("batTeamDetails", {}).get("batsmenData", {}).values():
+            name = b.get("batName", "")
             if name:
                 batters[name] = {
-                    "r":     int(b.get("r", 0) or 0),
-                    "fours": int(b.get("4s", 0) or 0),
-                    "sixes": int(b.get("6s", 0) or 0),
+                    "r":     int(b.get("runs", 0) or 0),
+                    "fours": int(b.get("fours", 0) or 0),
+                    "sixes": int(b.get("sixes", 0) or 0),
                 }
     return batters
 
 
-def extract_scores(data: dict) -> dict:
+def extract_scores(sc: dict) -> dict:
+    """Returns {inning_label: {r, w}} from scorecard innings headers."""
     scores = {}
-    for s in data.get("score", []):
-        inning = s.get("inning", "")
-        if inning:
-            scores[inning] = {
-                "r": int(s.get("r", 0) or 0),
-                "w": int(s.get("w", 0) or 0),
+    for inning in sc.get("scorecard", []):
+        label = inning.get("batTeamDetails", {}).get("batTeamName", "")
+        score_details = inning.get("scoreDetails", {})
+        if label:
+            scores[label] = {
+                "r": int(score_details.get("runs", 0) or 0),
+                "w": int(score_details.get("wickets", 0) or 0),
             }
     return scores
 
 
+def is_match_complete(sc: dict) -> bool:
+    header = sc.get("matchHeader", {})
+    return header.get("complete", False) or header.get("state", "") == "complete"
+
+
 # ── Event detection ───────────────────────────────────────────────────────────
 
-def check_events(data, match_name, prev_batters, prev_scores,
+def check_events(sc, match_name, prev_batters, prev_scores,
                  milestones_sent, baseline_only=False):
-    curr_batters = extract_batting(data)
-    curr_scores  = extract_scores(data)
+    curr_batters = extract_batting(sc)
+    curr_scores  = extract_scores(sc)
 
     if not baseline_only:
         # Wickets
@@ -162,7 +187,7 @@ def check_events(data, match_name, prev_batters, prev_scores,
 # ── Tracker loop ──────────────────────────────────────────────────────────────
 
 def run_tracker():
-    print("🏏 IPL Live Tracker started")
+    print("🏏 IPL Live Tracker started (Cricbuzz API)")
     send_alert("🏏 <b>IPL Live Tracker is now active!</b>\nWatching for 4s, 6s, wickets, and milestones.")
 
     match_id, match_name = None, None
@@ -176,51 +201,46 @@ def run_tracker():
     while True:
         poll_count += 1
 
-        # Find a match if we don't have one, or periodically check for IPL upgrade
+        # Find / upgrade match
         if not match_id or poll_count % IPL_CHECK_EVERY == 0:
-            matches = get_current_matches()
-            new_id, new_name = find_match(matches, skip_ids=ended_ids)
+            live = get_live_matches()
+            new_id, new_name = find_match(live, skip_ids=ended_ids)
 
             if not match_id:
                 if not new_id:
-                    print(f"No live match found. Retrying in {NO_MATCH_SLEEP//60} min...")
+                    print(f"No live match. Retrying in {NO_MATCH_SLEEP//60} min...")
                     time.sleep(NO_MATCH_SLEEP)
                     continue
                 match_id, match_name = new_id, new_name
                 print(f"Found: {match_name}  (id={match_id})")
                 send_alert(f"🏏 <b>Match Found!</b>\n{match_name}")
-                prev_batters.clear()
-                prev_scores.clear()
-                milestones_sent.clear()
+                prev_batters.clear(); prev_scores.clear(); milestones_sent.clear()
                 first_poll = True
 
             elif new_id and new_id != match_id:
-                # Only switch if new match is IPL and current is not
                 curr_is_ipl = "indian premier" in match_name.lower() or "ipl" in match_name.lower()
                 new_is_ipl  = "indian premier" in new_name.lower()  or "ipl" in new_name.lower()
                 if new_is_ipl and not curr_is_ipl:
                     print(f"IPL detected! Switching → {new_name}")
                     send_alert(f"🏏 <b>Switching to IPL!</b>\n{new_name}")
                     match_id, match_name = new_id, new_name
-                    prev_batters.clear()
-                    prev_scores.clear()
-                    milestones_sent.clear()
+                    prev_batters.clear(); prev_scores.clear(); milestones_sent.clear()
                     first_poll = True
 
         # Fetch scorecard
-        data = get_scorecard(match_id)
-        if not data:
+        sc = get_scorecard(match_id)
+        if not sc:
             time.sleep(POLL_INTERVAL)
             continue
 
-        if data.get("matchEnded"):
+        if is_match_complete(sc):
             send_alert(f"🏁 <b>Match Ended!</b>\n{match_name}")
             ended_ids.add(match_id)
             match_id, match_name = None, None
             time.sleep(NO_MATCH_SLEEP)
             continue
 
-        check_events(data, match_name, prev_batters, prev_scores,
+        check_events(sc, match_name, prev_batters, prev_scores,
                      milestones_sent, baseline_only=first_poll)
 
         if first_poll:
