@@ -86,13 +86,12 @@ def _fetch_rsc(url: str) -> str:
 DEAD_STATES = {"complete", "preview", "upcoming", ""}
 
 def get_live_match() -> tuple:
-    """IPL priority, fallback to any live match. Returns (match_id, match_name)."""
+    """Returns (match_id, match_name) for live IPL match only."""
     data = _fetch_rsc(f"{BASE}/cricket-match/live")
     if not data:
         return None, None
 
     match_ids = list(dict.fromkeys(re.findall(r'"matchId":(\d+)', data)))
-    ipl_match = fallback = None
 
     for mid in match_ids:
         idx = data.find(f'"matchId":{mid}')
@@ -101,21 +100,18 @@ def get_live_match() -> tuple:
         st  = sv.group(1) if sv else ""
         if st.lower() in DEAD_STATES:
             continue
+        sn  = re.search(r'"seriesName":"([^"]+)"', ctx)
+        if not ("indian premier" in ctx.lower() or (sn and "ipl" in sn.group(1).lower())):
+            continue
         t1  = re.search(r'"team1".*?"teamSName":"([^"]+)"', ctx)
         t2  = re.search(r'"team2".*?"teamSName":"([^"]+)"', ctx)
-        sn  = re.search(r'"seriesName":"([^"]+)"', ctx)
         t1n = t1.group(1) if t1 else "?"
         t2n = t2.group(1) if t2 else "?"
-        name = f"{t1n} vs {t2n} — {sn.group(1) if sn else '?'}"
-        if "indian premier" in ctx.lower() or (sn and "ipl" in sn.group(1).lower()):
-            ipl_match = (mid, name); break
-        if not fallback:
-            fallback = (mid, name)
+        name = f"{t1n} vs {t2n} — {sn.group(1) if sn else 'IPL 2026'}"
+        print(f"[IPL Live] matchId={mid}: {name}")
+        return mid, name
 
-    result = ipl_match or fallback
-    if result:
-        print(f"[Live] matchId={result[0]}: {result[1]}")
-    return result or (None, None)
+    return None, None
 
 
 def get_scorecard(match_id: str) -> dict:
