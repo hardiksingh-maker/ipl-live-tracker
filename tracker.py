@@ -42,6 +42,16 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
+def self_ping():
+    """Hit our own health endpoint every 5 min to prevent Render free-plan sleep."""
+    time.sleep(60)  # wait for server to start
+    while True:
+        try:
+            requests.get(f"http://localhost:{PORT}", timeout=5)
+        except Exception:
+            pass
+        time.sleep(300)
+
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
@@ -233,5 +243,6 @@ def run_tracker():
 
 if __name__ == "__main__":
     threading.Thread(target=start_health_server, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
     print(f"Health server on port {PORT}")
     run_tracker()
