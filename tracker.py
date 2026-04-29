@@ -53,7 +53,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def start_health_server():
-    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.socket.setsockopt(1, 2, 1)  # SO_REUSEADDR — prevents "address already in use" on restart
+    server.serve_forever()
 
 RENDER_URL = "https://ipl-live-tracker.onrender.com"
 
@@ -106,35 +108,64 @@ def send_clevertap(title: str, body: str):
         print(f"[CleverTap error] {e}")
 
 
-# ── Combined alert ────────────────────────────────────────────────────────────
+# ── Alerts ───────────────────────────────────────────────────────────────────
 
-def _schedule_clevertap(title: str, body: str):
-    """Wait 10 min after detection, then wait until 8:20 PM if needed, then send."""
+def send_alert(text: str, include_ct: bool = False):
+    """
+    Immediate alert — used for match start/end/tracker status.
+    include_ct=True sends CleverTap immediately as well (for match start).
+    Never counts against the milestone cap.
+    """
+    send_telegram(text)
+    if include_ct:
+        lines = re.sub(r"<[^>]+>", "", text).strip().splitlines()
+        title = lines[0].strip() if lines else text[:40]
+        body  = lines[1].strip() if len(lines) >= 2 else ""
+        send_clevertap(title, body)
+    print(f"[ALERT] {text.splitlines()[0]}")
+
+
+def send_milestone_alert(text: str):
+    """
+    Milestone alert (50/100).
+
+    Timing rules:
+    - Detected before 8:20 PM  →  send at exactly 8:20 PM
+    - Detected at/after 8:20 PM →  send 10 min after detection
+
+    Both Telegram and CleverTap fire at the same calculated time.
+    Capped at MAX_PUSHES (3) per match — excess milestones are dropped.
+    """
+    lines = re.sub(r"<[^>]+>", "", text).strip().splitlines()
+    title = lines[0].strip() if lines else text[:40]
+    body  = lines[1].strip() if len(lines) >= 2 else ""
+
+    detected_at = datetime.datetime.now(IST)
+    cutoff      = detected_at.replace(hour=PUSH_AFTER_IST[0], minute=PUSH_AFTER_IST[1],
+                                      second=0, microsecond=0)
+
+    if detected_at < cutoff:
+        send_at = cutoff                                                      # hold until 8:20 PM
+    else:
+        send_at = detected_at + datetime.timedelta(seconds=PUSH_DELAY)       # +10 min
+
+    wait_secs = max(0, (send_at - detected_at).total_seconds())
+    print(f"[MILESTONE] {title} — scheduled at {send_at.strftime('%H:%M')} IST "
+          f"(wait {int(wait_secs)}s)")
+
     def _fire():
         global _push_count
-        time.sleep(PUSH_DELAY)
-        # If still before 8:20 PM, hold until exactly 8:20 PM
-        now = datetime.datetime.now(IST)
-        cutoff = now.replace(hour=PUSH_AFTER_IST[0], minute=PUSH_AFTER_IST[1], second=0, microsecond=0)
-        if now < cutoff:
-            wait = (cutoff - now).total_seconds()
-            print(f"[CT] Holding {int(wait)}s until 8:20 PM IST...")
-            time.sleep(wait)
+        time.sleep(wait_secs)
         with _push_lock:
             if _push_count >= MAX_PUSHES:
-                print(f"[CT SKIP] Max {MAX_PUSHES} pushes reached")
+                print(f"[MILESTONE SKIP] Cap {MAX_PUSHES} reached — dropped: {title}")
                 return
+            send_telegram(text)
             send_clevertap(title, body)
             _push_count += 1
-            print(f"[CT] Push {_push_count}/{MAX_PUSHES} sent")
-    threading.Thread(target=_fire, daemon=True).start()
+            print(f"[MILESTONE SENT] {_push_count}/{MAX_PUSHES}: {title}")
 
-def send_alert(text: str):
-    send_telegram(text)
-    lines = re.sub(r"<[^>]+>", "", text).strip().splitlines()
-    if len(lines) >= 2:
-        _schedule_clevertap(lines[0].strip(), lines[1].strip())
-    print(f"[ALERT] {text.splitlines()[0]}")
+    threading.Thread(target=_fire, daemon=True).start()
 
 
 # ── Cricbuzz scraper ──────────────────────────────────────────────────────────
@@ -201,9 +232,11 @@ def get_scorecard(match_id: str) -> dict:
 
 def is_match_complete(match_id: str) -> bool:
     data = _fetch_rsc(f"{BASE}/cricket-match/live")
-    idx  = data.find(f'"matchId":{match_id}')
+    if not data:
+        return False  # network failure → assume still live, don't end match prematurely
+    idx = data.find(f'"matchId":{match_id}')
     if idx == -1:
-        return True
+        return True  # match no longer in live feed → genuinely over
     ctx   = data[max(0, idx - 100): idx + 300]
     state = re.search(r'"state":"([^"]+)"', ctx)
     return state.group(1).lower() == "complete" if state else False
@@ -250,11 +283,11 @@ def check_events(match_id, prev_batters, milestones_sent, baseline_only=False):
             prev_r = prev_batters.get(name, 0)
 
             if prev_r < 50 <= runs and f"{name}_50" not in milestones_sent:
-                send_alert(fifty_msg(name, runs))
+                send_milestone_alert(fifty_msg(name, runs))
                 milestones_sent.add(f"{name}_50")
 
             if prev_r < 100 <= runs and f"{name}_100" not in milestones_sent:
-                send_alert(century_msg(name, runs))
+                send_milestone_alert(century_msg(name, runs))
                 milestones_sent.add(f"{name}_100")
 
     prev_batters.clear()
@@ -267,10 +300,11 @@ def run_tracker():
     print("🏏 IPL Tracker started (no API key)")
     send_alert("🏏 <b>IPL Tracker active!</b>\nAlerts: 50s · 100s")
 
-    match_id, match_name = None, None
-    prev_batters:    dict = {}
-    milestones_sent: set  = set()
-    first_poll            = False
+    match_id,     match_name   = None, None
+    prev_batters: dict         = {}
+    milestones_sent: set       = set()
+    seen_match_ids: set        = set()   # prevents re-alerting same match on restart
+    first_poll                 = False
 
     while True:
         if not match_id:
@@ -279,13 +313,21 @@ def run_tracker():
                 print(f"No live match. Retrying in {NO_MATCH_SLEEP // 60} min...")
                 time.sleep(NO_MATCH_SLEEP)
                 continue
+
+            if new_id in seen_match_ids:
+                # same match still appearing as live after we marked it done — wait it out
+                print(f"[SKIP] Match {new_id} already processed. Waiting...")
+                time.sleep(NO_MATCH_SLEEP)
+                continue
+
             match_id, match_name = new_id, new_name
-            send_alert(f"🏏 <b>Match Started!</b>\n{match_name}")
+            seen_match_ids.add(match_id)
+            send_alert(f"🏏 <b>Match Started!</b>\n{match_name}", include_ct=True)
             prev_batters.clear()
             milestones_sent.clear()
             global _push_count
             _push_count = 0
-            first_poll = True
+            first_poll  = True
 
         if is_match_complete(match_id):
             send_alert(f"🏁 <b>Match Ended!</b>\n{match_name}")
