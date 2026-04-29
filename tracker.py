@@ -109,15 +109,18 @@ def send_clevertap(title: str, body: str):
 # ── Combined alert ────────────────────────────────────────────────────────────
 
 def _schedule_clevertap(title: str, body: str):
-    """Delay 10 min, then send only if after 8:20 PM and under push cap."""
+    """Wait 10 min after detection, then wait until 8:20 PM if needed, then send."""
     def _fire():
         global _push_count
         time.sleep(PUSH_DELAY)
+        # If still before 8:20 PM, hold until exactly 8:20 PM
         now = datetime.datetime.now(IST)
+        cutoff = now.replace(hour=PUSH_AFTER_IST[0], minute=PUSH_AFTER_IST[1], second=0, microsecond=0)
+        if now < cutoff:
+            wait = (cutoff - now).total_seconds()
+            print(f"[CT] Holding {int(wait)}s until 8:20 PM IST...")
+            time.sleep(wait)
         with _push_lock:
-            if (now.hour, now.minute) < PUSH_AFTER_IST:
-                print(f"[CT SKIP] {now.strftime('%H:%M')} IST — before 8:20 PM")
-                return
             if _push_count >= MAX_PUSHES:
                 print(f"[CT SKIP] Max {MAX_PUSHES} pushes reached")
                 return
