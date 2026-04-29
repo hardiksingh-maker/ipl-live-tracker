@@ -172,14 +172,24 @@ def send_milestone_alert(text: str):
 
 def _fetch_rsc(url: str) -> str:
     try:
-        r = requests.get(url, headers=HDR, timeout=15)
-        chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.+?)"\]\)', r.text, re.DOTALL)
-        combined = "".join(chunks)
-        try:
-            combined = combined.encode().decode("unicode_escape")
-        except Exception:
-            pass
-        return combined
+        r = requests.get(url, headers=HDR, timeout=20)
+        raw = r.text
+
+        # Extract Next.js RSC payload chunks
+        chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.+?)"\]\)', raw, re.DOTALL)
+        if chunks:
+            combined = "".join(chunks)
+            # Decode unicode escapes safely — errors='replace' never corrupts the string
+            try:
+                combined = combined.encode("utf-8").decode("unicode_escape", errors="replace")
+            except Exception:
+                pass  # use raw combined if decode raises
+            if combined.strip():
+                return combined
+
+        # Fallback: return the full page source so field-level regexes still have a chance
+        print(f"[Fetch] RSC chunks empty for {url.split('/')[-1]} — falling back to raw HTML")
+        return raw
     except Exception as e:
         print(f"[Fetch error] {url}: {e}")
         return ""
@@ -187,32 +197,62 @@ def _fetch_rsc(url: str) -> str:
 
 DEAD_STATES = {"complete", "preview", "upcoming", ""}
 
+IPL_KEYWORDS = ["indian premier league", "ipl 20", "ipl2"]
+
 def get_live_match() -> tuple:
-    """Returns (match_id, match_name) for live IPL match only."""
+    """Returns (match_id, match_name) for the current live IPL match."""
     data = _fetch_rsc(f"{BASE}/cricket-match/live")
     if not data:
         return None, None
 
+    # Deduplicated match IDs in page order
     match_ids = list(dict.fromkeys(re.findall(r'"matchId":(\d+)', data)))
+    print(f"[Scraper] {len(match_ids)} match IDs found on live page")
 
     for mid in match_ids:
-        idx = data.find(f'"matchId":{mid}')
-        ctx = data[max(0, idx - 400): idx + 700]
-        sv  = re.search(r'"state":"([^"]+)"', ctx)
-        st  = sv.group(1) if sv else ""
-        if st.lower() in DEAD_STATES:
-            continue
-        sn  = re.search(r'"seriesName":"([^"]+)"', ctx)
-        if not ("indian premier" in ctx.lower() or (sn and "ipl" in sn.group(1).lower())):
-            continue
-        t1  = re.search(r'"team1".*?"teamSName":"([^"]+)"', ctx)
-        t2  = re.search(r'"team2".*?"teamSName":"([^"]+)"', ctx)
-        t1n = t1.group(1) if t1 else "?"
-        t2n = t2.group(1) if t2 else "?"
-        name = f"{t1n} vs {t2n} — {sn.group(1) if sn else 'IPL 2026'}"
-        print(f"[IPL Live] matchId={mid}: {name}")
-        return mid, name
+        needle = f'"matchId":{mid}'
+        start  = 0
+        found  = False
 
+        # Check every occurrence of this matchId — pick the one that has
+        # both "state" AND series info within a tight 2000-char window
+        while True:
+            idx = data.find(needle, start)
+            if idx == -1:
+                break
+            ctx = data[max(0, idx - 500): idx + 1500]
+            start = idx + len(needle)
+
+            sv = re.search(r'"state"\s*:\s*"([^"]+)"', ctx)
+            if not sv:
+                continue
+            st = sv.group(1).lower()
+            if st in DEAD_STATES:
+                found = True  # state exists but dead — no need to check other occurrences
+                break
+
+            sn = re.search(r'"seriesName"\s*:\s*"([^"]+)"', ctx)
+            if not sn:
+                continue  # seriesName not in this occurrence's window — try next
+
+            series = sn.group(1).lower()
+            if not any(kw in series for kw in IPL_KEYWORDS):
+                print(f"[Scraper] matchId={mid} state={st!r} series={sn.group(1)!r} — not IPL")
+                found = True
+                break
+
+            # ── Live IPL match found ──
+            t_names = re.findall(r'"teamSName"\s*:\s*"([^"]+)"', ctx)
+            t1n  = t_names[0] if len(t_names) > 0 else "?"
+            t2n  = t_names[1] if len(t_names) > 1 else "?"
+            name = f"{t1n} vs {t2n} — {sn.group(1)}"
+            print(f"[IPL Live] matchId={mid} state={st!r}: {name}")
+            return mid, name
+
+        if not found:
+            pass  # matchId appeared only in non-state contexts — skip silently
+
+    print(f"[Scraper] No live IPL match found among {len(match_ids)} matches")
     return None, None
 
 
@@ -220,12 +260,32 @@ def get_scorecard(match_id: str) -> dict:
     data = _fetch_rsc(f"{BASE}/live-cricket-scorecard/{match_id}")
     if not data:
         return {}
+
     batters = {}
-    for m in re.finditer(r'"bat_\d+":\{[^}]*"batName":"([^"]+)"[^}]*"runs":(\d+)', data):
-        name, runs = m.group(1), int(m.group(2))
-        if name and runs > batters.get(name, -1):  # keep highest run count if name appears twice
-            batters[name] = runs
+
+    # Approach 1: find "batName" then look for "runs" within the next 300 chars
+    for m in re.finditer(r'"batName"\s*:\s*"([^"]+)"', data):
+        name = m.group(1)
+        nearby = data[m.end(): m.end() + 300]
+        rm = re.search(r'"runs"\s*:\s*"?(\d+)"?', nearby)
+        if rm:
+            runs = int(rm.group(1))
+            if runs > batters.get(name, -1):
+                batters[name] = runs
+
+    # Approach 2 (fallback): broader name/r pattern used in Cricbuzz's newer format
     if not batters:
+        for m in re.finditer(r'"batName"\s*:\s*"([^"]+)"', data):
+            name = m.group(1)
+            nearby = data[m.end(): m.end() + 300]
+            rm = re.search(r'"r"\s*:\s*"?(\d+)"?', nearby)
+            if rm:
+                runs = int(rm.group(1))
+                if runs > batters.get(name, -1):
+                    batters[name] = runs
+
+    if not batters:
+        print(f"[Scorecard] No batter data found for match {match_id}")
         return {}
     return {"batters": batters}
 
